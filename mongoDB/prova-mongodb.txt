@@ -1,0 +1,238 @@
+/* 
+
+Definiamo una vista come il join tra Persona e Ospite, e successivamente esportiamo 
+il result set in un file json:
+
+*/
+
+CREATE VIEW persona_xmongo ( CF,Nome,Cognome,Mail,Telefono,DataNascita,PrenotazioneStanza) AS
+SELECT CF,Nome,Cognome,Mail,Telefono,DataNascita,PrenotazioneStanza
+FROM Persona P
+JOIN Ospite O
+ON P.CF = O.Persona;
+
+SELECT JSON_OBJECT("cf",CF,"nome",Nome,"cognome",Cognome,"mail",Mail,"tel",Telefono,"data_nascita",DataNascita,"id_prenotazione",PrenotazioneStanza)
+INTO OUTFILE 'path/persona.json' FROM persona_xmongo;
+
+
+/* Alternativamente possiamo anche non definire una vista: */
+
+SELECT JSON_OBJECT("_id",IdPrenotazione,"data_inizio",DataInizio,"data_fine",DataFine,"num_posti",NumPosti,"stanza",Stanza,
+"nome_hotel",NomeHotel,"via_hotel",ViaHotel,"citta_hotel",CittaHotel,"societa",Societa,"persona",Persona,"fattura",IdFattura,
+"totale",Totale,"data_fattura",Data,"tipo_pagamento",TipoPagamento)
+INTO OUTFILE 'path/prenotazioni.json' FROM PrenotazioneStanza PS JOIN FatturaPrenotazione FP ON 
+PS.IdPrenotazione = FP.PrenotazioneStanza;
+
+
+SELECT JSON_OBJECT("nome",H.Nome,"via",Via,"citta",Citta,"stelle",Stelle,"tel",Telefono,"stanza",IdStanza,"prezzo",Prezzo,
+"num_posti",NumPosti,"nome_sala",S.Nome)
+INTO OUTFILE 'path/hotel.json' FROM Hotel H JOIN Stanza S ON 
+H.Nome = S.NomeHotel AND
+H.Via = S.ViaHotel AND
+H.Citta = S.CittaHotel;
+
+
+cd path
+
+mongoimport --db HotelStatistics --collection persona --file persona.json
+mongoimport --db HotelStatistics --collection prenotazioni --file prenotazioni.json
+mongoimport --db HotelStatistics --collection hotel --file hotel.json
+
+
+/*
+Fatto cio abbiamo creato il db HotelStatistics in mongodb contenente le tre collections:
+persona, prenotazioni e hotel.
+-persona contiene i documenti corrispondenti alle tuple del result set associato
+al join tra Persona e Ospite
+-prenotazioni contiene i documenti corrispondenti alle tuple del result set associato
+al join tra PrenotazioneStanza e FatturaPrenotazione
+-hotel contiene i documenti corrispondenti alle tuple del result set associato
+al join tra Hotel e Stanza
+*/
+
+
+/* 
+Esempi di update. Nota: in realtà tali update servono per convertire alcuni campi
+stringa dei file json in formato data. Tale risultato potrebbe essere ottenuto 
+con l'opzione --columnsHaveTypesdi dell'utility mongoimport nell'import di file csv
+*/
+
+db.prenotazioni.updateMany( { },
+[   {        
+      $set: { data_inizio: { $dateFromString: { dateString: "$data_inizio" } } }
+    }])
+
+
+db.prenotazioni.updateMany( { },
+[   {        
+      $set: { data_fine: { $dateFromString: { dateString: "$data_fine" } } }
+    }])
+
+
+db.prenotazioni.updateMany( { },
+[   {        
+      $set: { data_fattura: { $dateFromString: { dateString: "$data_fattura" } } }
+    }])
+
+
+
+/* Query in mongodb */
+
+1. Stampare nome, cognome e numero di telefono di tutte le persone che sono o
+sono stati ospiti in una stanza d’hotel.
+
+db.persona.find({},{_id:0,nome:1,cognome:1,tel:1})
+
+
+
+4. Data la stanza N.186 dell’Hotel Overlook trovare (in ordine di DataInizio) se
+esistono le possibili prenotazioni con periodo di permanenza sovrapponibile al
+periodo con DataInizio 2021-10-08 e DataFine 2021-10-13.
+
+db.prenotazioni.find( {
+$and: [
+{"stanza": 186},
+{"nome_hotel": "Hotel Overlook"},
+{"via_hotel": "Via Cavour 333"},
+{"citta_hotel": "Torino"},
+{ $or: [
+{"data_inizio": {$gte: new Date("2021-10-08"), $lte: new Date("2021-10-13")} },
+{"data_fine": {$gte: new Date("2021-10-08"), $lte: new Date("2021-10-13")}}]}
+] } ).sort({"data_inizio": 1})
+
+
+
+5. Dato l’Hotel Overlook e il periodo di permanenza DataInizio = 2022-01-08 e
+DataFine = 2022-01-13 e trovare tutte le stanze non prenotate per quel periodo
+nell’hotel dato
+
+
+/* Nota: In questa query il .toArray().map(function(ele) {return ele.stanza}) ha lo scopo 
+di associare alla variabile stanze_occupate l'array con tutti i numeri delle stanze occupate
+nell'hotel e nel periodo indicato */
+
+
+var stanze_occupate = db.prenotazioni.find( {
+$and: [
+{"nome_hotel": "Hotel Overlook"},
+{"via_hotel": "Via Cavour 333"},
+{"citta_hotel": "Torino"},
+{ $or: [
+{"data_inizio": {$gte: new Date("2021-10-08"), $lte: new Date("2021-10-13")} },
+{"data_fine": {$gte: new Date("2021-10-08"), $lte: new Date("2021-10-13")}}]}
+] }, {_id:0,stanza:1}).toArray().map(function(ele) {return ele.stanza})
+
+
+db.hotel.find({ $and: [
+{"nome": "Hotel Overlook"},
+{"via": "Via Cavour 333"},
+{"citta": "Torino"},
+{stanza: {$nin: stanze_occupate}}]},{_id:0,stanza:1})
+
+
+
+6. Dato l’anno 2021, stampare per ogni mese la somma degli importi pagati dai
+clienti in quel mese e il numero di fatture emesse.
+
+db.prenotazioni.aggregate( 
+{ $match: { data_fattura: { $gte: ISODate("2021-01-01T00:00:00.0Z"), $lt: ISODate("2021-12-31T00:00:00.0Z") } } }, 
+{ $group: { _id: { mese: { $month: "$data_fattura" } }, numero_fatture: { $sum: 1 }, totale: { $sum: "$totale" } } },
+{$sort: {_id:1}})
+
+
+
+14. Stampare codice fiscale, nome, cognome, numero di telefono di tutte le persone
+che sono stati ospiti della catena alberghiera più di due volte.
+
+db.persona.aggregate([
+   { $group: { 
+      _id : "$cf",
+      nome : { $first: "$nome"},
+      cognome : { $first: "$cognome"},
+      mail : { $first: "$mail"},
+      tel : { $first: "$tel"},
+      numero_soggiorni : { $sum: 1} } },
+   { $match: { numero_soggiorni : { $gt: 2} } }
+])
+
+/* In questa query la group key è il document-field cf. I documenti ottenuti
+dall'aggregazione presentano anche i campi nome, cognome, etc con i relativi valori.
+Tale risultato è possibile scrivendo nome : { $first: "$nome"}, ...  */
+
+
+
+15. Dato l’anno 2021 e l’Hotel Casino, Corso degli Inglesi 18, Sanremo stampare per
+ogni mese il numero di prenotazioni ricevute e la somma degli importi pagati per
+le prenotazioni in quel mese. 
+
+/* Nota: In aggiunta ordiniamo i documenti in ordine crescente di mese. */
+
+db.prenotazioni.aggregate( 
+{ $match: { $and: [ {data_fattura: { $gte: ISODate("2021-01-01T00:00:00.0Z"), $lt: ISODate("2021-12-31T00:00:00.0Z") }}, 
+{"nome_hotel": "Hotel Casino"},
+{"via_hotel": "Corso degli Inglesi 18"},
+{"citta_hotel": "Sanremo"} ] } }, 
+{ $group: { _id: { mese: { $month: "$data_fattura" } }, numero_fatture: { $sum: 1 }, totale: { $sum: "$totale" } } },
+{$sort: {"_id.mese":1}})
+
+
+... in alternativa definendo opportune variabili si può riscrivere l'aggregation in maniera più compatta.
+
+var yearAndHotel = { $and: [ {data_fattura: { $gte: ISODate("2021-01-01T00:00:00.0Z"), $lt: ISODate("2021-12-31T00:00:00.0Z") }}, 
+{"nome_hotel": "Hotel Casino"},
+{"via_hotel": "Corso degli Inglesi 18"},
+{"citta_hotel": "Sanremo"} ] }
+
+var reservationsAndProfits = { _id: { mese: { $month: "$data_fattura" } }, numero_fatture: { $sum: 1 }, totale: { $sum: "$totale" } }
+
+db.prenotazioni.aggregate( 
+{ $match: yearAndHotel }, 
+{ $group: reservationsAndProfits},
+{$sort: {"_id".mese:1}})
+
+
+
+
+/* 
+possibile aggiunta sulle prestazioni. altrimenti considerare l'executionTimeMillis value 
+di db.<collection>.<query>.explain('executionStats')
+*/
+
+/* È possibile simulare l'operazione di join in mongodb. Tuttavia tale operazione
+risulta avere tempi di esecuzioni inefficienti, specialmente se confrontati con
+quelli di un RDBMS. */
+
+/* La seguente query simula il join tra le collection prenotazioni e persona, come
+se esse fossere delle tabelle in un RDBMS. È all'incirca equivalente alla seguente
+query, che ha un query response time di 3,90 sec:
+(
+select * 
+from Ospite o 
+join Persona p 
+on o.Persona = p.CF 
+join PrenotazioneStanza ps 
+on ps.IdPrenotazione = o.PrenotazioneStanza 
+join FatturaPrenotazione fp 
+on fp.PrenotazioneStanza = ps.IdPrenotazione;
+) */
+
+db.prenotazioni.aggregate([ 
+{$lookup: {from: "persona", localField: "_id",foreignField: "id_prenotazione",as: "ospite"}},
+{$unwind: "$ospite"} ]) 
+
+/* Una stima molto approssimata del query response time può essere ottenuta nel 
+modo seguente. (La variabile risultato è di poco sopra i 10 sec) */
+
+var inizio = new Date()
+
+db.prenotazioni.aggregate([ 
+{$lookup: {from: "persona", localField: "_id",foreignField: "id_prenotazione",as: "ospite"}},
+{$unwind: "$ospite"} ])
+
+var fine = new Date()
+
+var risultato = fine - inizio
+risultato
+
+
+
